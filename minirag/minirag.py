@@ -6,7 +6,7 @@ from functools import partial
 from typing import Type, cast, Any
 from dotenv import load_dotenv
 
-
+# 导入各类操作函数和工具函数
 from .operate import (
     chunking_by_token_size,
     extract_entities,
@@ -35,7 +35,7 @@ from .base import (
     DocStatus,
 )
 
-
+# 存储类型与实现模块的映射
 STORAGES = {
     "NetworkXStorage": ".kg.networkx_impl",
     "JsonKVStorage": ".kg.json_kv_impl",
@@ -66,27 +66,28 @@ STORAGES = {
 }
 
 # future KG integrations
-
 # from .kg.ArangoDB_impl import (
 #     GraphStorage as ArangoDBStorage
 # )
 
+# 加载环境变量
 load_dotenv(dotenv_path=".env", override=False)
 
 
 def lazy_external_import(module_name: str, class_name: str):
-    """Lazily import a class from an external module based on the package of the caller."""
-
-    # Get the caller's module and package
+    """
+    懒加载外部模块中的类。
+    :param module_name: 模块名
+    :param class_name: 类名
+    :return: 类的构造器
+    """
     import inspect
-
     caller_frame = inspect.currentframe().f_back
     module = inspect.getmodule(caller_frame)
     package = module.__package__ if module else None
 
     def import_class(*args, **kwargs):
         import importlib
-
         module = importlib.import_module(module_name, package=package)
         cls = getattr(module, class_name)
         return cls(*args, **kwargs)
@@ -96,23 +97,15 @@ def lazy_external_import(module_name: str, class_name: str):
 
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
     """
-    Ensure that there is always an event loop available.
-
-    This function tries to get the current event loop. If the current event loop is closed or does not exist,
-    it creates a new event loop and sets it as the current event loop.
-
-    Returns:
-        asyncio.AbstractEventLoop: The current or newly created event loop.
+    保证总能获取到一个可用的事件循环。
+    :return: 当前或新建的事件循环
     """
     try:
-        # Try to get the current event loop
         current_loop = asyncio.get_event_loop()
         if current_loop.is_closed():
             raise RuntimeError("Event loop is closed.")
         return current_loop
-
     except RuntimeError:
-        # If no event loop exists or it is closed, create a new one
         logger.info("Creating a new event loop in main thread.")
         new_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(new_loop)
@@ -121,29 +114,26 @@ def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
 
 @dataclass
 class MiniRAG:
+    """
+    MiniRAG主类，负责RAG系统的初始化、文档插入、查询、删除等核心流程。
+    支持多种存储后端、分块、实体抽取、异步处理等。
+    """
     working_dir: str = field(
         default_factory=lambda: f"./minirag_cache_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
     )
-
-    # RAGmode: str = 'minirag'
-
     kv_storage: str = field(default="JsonKVStorage")
     vector_storage: str = field(default="NanoVectorDBStorage")
     graph_storage: str = field(default="NetworkXStorage")
-
     current_log_level = logger.level
     log_level: str = field(default=current_log_level)
-
-    # text chunking
+    # 文本分块参数
     chunk_token_size: int = 1200
     chunk_overlap_token_size: int = 100
     tiktoken_model_name: str = "gpt-4o-mini"
-
-    # entity extraction
+    # 实体抽取参数
     entity_extract_max_gleaning: int = 1
     entity_summary_to_max_tokens: int = 500
-
-    # node embedding
+    # 节点嵌入参数
     node_embedding_algorithm: str = "node2vec"
     node2vec_params: dict = field(
         default_factory=lambda: {
@@ -155,55 +145,46 @@ class MiniRAG:
             "random_seed": 3,
         }
     )
-
     embedding_func: EmbeddingFunc = None
     embedding_batch_num: int = 32
     embedding_func_max_async: int = 16
-
-    # LLM
+    # LLM相关参数
     llm_model_func: callable = None
     llm_model_name: str = (
-        "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
+        "meta-llama/Llama-3.2-1B-Instruct"
     )
     llm_model_max_token_size: int = 32768
     llm_model_max_async: int = 16
     llm_model_kwargs: dict = field(default_factory=dict)
-
-    # storage
+    # 存储相关参数
     vector_db_storage_cls_kwargs: dict = field(default_factory=dict)
-
     enable_llm_cache: bool = True
-
-    # extension
+    # 扩展参数
     addon_params: dict = field(default_factory=dict)
     convert_response_to_json_func: callable = convert_response_to_json
-
-    # Add new field for document status storage type
+    # 文档状态存储类型
     doc_status_storage: str = field(default="JsonDocStatusStorage")
-
-    # Custom Chunking Function
+    # 自定义分块函数
     chunking_func: callable = chunking_by_token_size
     chunking_func_kwargs: dict = field(default_factory=dict)
-
     max_parallel_insert: int = field(default=int(os.getenv("MAX_PARALLEL_INSERT", 2)))
 
     def __post_init__(self):
+        """
+        初始化方法，设置日志、工作目录、各类存储、缓存、嵌入函数等。
+        """
         log_file = os.path.join(self.working_dir, "minirag.log")
         set_logger(log_file)
         logger.setLevel(self.log_level)
-
         logger.info(f"Logger initialized for working directory: {self.working_dir}")
         if not os.path.exists(self.working_dir):
             logger.info(f"Creating working directory {self.working_dir}")
             os.makedirs(self.working_dir)
-
-        # show config
+        # 打印全局配置
         global_config = asdict(self)
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in global_config.items()])
         logger.debug(f"MiniRAG init with param:\n  {_print_config}\n")
-
-        # @TODO: should move all storage setup here to leverage initial start params attached to self.
-
+        # 初始化各类存储类
         self.key_string_value_json_storage_cls: Type[BaseKVStorage] = (
             self._get_storage_class(self.kv_storage)
         )
@@ -213,15 +194,12 @@ class MiniRAG:
         self.graph_storage_cls: Type[BaseGraphStorage] = self._get_storage_class(
             self.graph_storage
         )
-
         self.key_string_value_json_storage_cls = partial(
             self.key_string_value_json_storage_cls, global_config=global_config
         )
-
         self.vector_db_storage_cls = partial(
             self.vector_db_storage_cls, global_config=global_config
         )
-
         self.graph_storage_cls = partial(
             self.graph_storage_cls, global_config=global_config
         )
@@ -229,11 +207,9 @@ class MiniRAG:
             namespace="json_doc_status_storage",
             embedding_func=None,
         )
-
         if not os.path.exists(self.working_dir):
             logger.info(f"Creating working directory {self.working_dir}")
             os.makedirs(self.working_dir)
-
         self.llm_response_cache = (
             self.key_string_value_json_storage_cls(
                 namespace="llm_response_cache",
@@ -243,13 +219,12 @@ class MiniRAG:
             if self.enable_llm_cache
             else None
         )
-
+        # 限制嵌入函数的并发数
         self.embedding_func = limit_async_func_call(self.embedding_func_max_async)(
             self.embedding_func
         )
-
         ####
-        # add embedding func by walter
+        # 文档、分块、图等存储实例
         ####
         self.full_docs = self.key_string_value_json_storage_cls(
             namespace="full_docs",
@@ -266,10 +241,6 @@ class MiniRAG:
             global_config=asdict(self),
             embedding_func=self.embedding_func,
         )
-        ####
-        # add embedding func by walter over
-        ####
-
         self.entities_vdb = self.vector_db_storage_cls(
             namespace="entities",
             global_config=asdict(self),
@@ -277,14 +248,12 @@ class MiniRAG:
             meta_fields={"entity_name"},
         )
         global_config = asdict(self)
-
         self.entity_name_vdb = self.vector_db_storage_cls(
             namespace="entities_name",
             global_config=asdict(self),
             embedding_func=self.embedding_func,
             meta_fields={"entity_name"},
         )
-
         self.relationships_vdb = self.vector_db_storage_cls(
             namespace="relationships",
             global_config=asdict(self),
@@ -296,7 +265,7 @@ class MiniRAG:
             global_config=asdict(self),
             embedding_func=self.embedding_func,
         )
-
+        # LLM模型函数并发限制
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(
             partial(
                 self.llm_model_func,
@@ -304,7 +273,7 @@ class MiniRAG:
                 **self.llm_model_kwargs,
             )
         )
-        # Initialize document status storage
+        # 文档状态存储
         self.doc_status_storage_cls = self._get_storage_class(self.doc_status_storage)
         self.doc_status = self.doc_status_storage_cls(
             namespace="doc_status",
@@ -313,12 +282,20 @@ class MiniRAG:
         )
 
     def _get_storage_class(self, storage_name: str) -> dict:
+        """
+        根据存储名获取对应的存储类。
+        :param storage_name: 存储类型名
+        :return: 存储类
+        """
         import_path = STORAGES[storage_name]
         storage_class = lazy_external_import(import_path, storage_name)
         return storage_class
 
     def set_storage_client(self, db_client):
-        # Now only tested on Oracle Database
+        """
+        设置底层数据库客户端（如Oracle等）。
+        :param db_client: 数据库客户端实例
+        """
         for storage in [
             self.vector_db_storage_cls,
             self.graph_storage_cls,
@@ -334,10 +311,15 @@ class MiniRAG:
             self.chunk_entity_relation_graph,
             self.llm_response_cache,
         ]:
-            # set client
+            # 统一设置db属性
             storage.db = db_client
 
     def insert(self, string_or_strings):
+        """
+        同步插入文档（自动调度异步）。
+        :param string_or_strings: 单个或多个文档字符串
+        :return: 插入结果
+        """
         loop = always_get_an_event_loop()
         return loop.run_until_complete(self.ainsert(string_or_strings))
 
@@ -348,17 +330,22 @@ class MiniRAG:
         split_by_character_only: bool = False,
         ids: str | list[str] | None = None,
     ) -> None:
+        """
+        异步插入文档，支持分块、实体抽取等。
+        :param input: 文本或文本列表
+        :param split_by_character: 按字符分割（可选）
+        :param split_by_character_only: 是否仅按字符分割
+        :param ids: 文档ID或ID列表
+        """
         if isinstance(input, str):
             input = [input]
         if isinstance(ids, str):
             ids = [ids]
-
         await self.apipeline_enqueue_documents(input, ids)
         await self.apipeline_process_enqueue_documents(
             split_by_character, split_by_character_only
         )
-
-        # Perform additional entity extraction as per original ainsert logic
+        # 对新处理的分块做实体抽取
         inserting_chunks = {
             compute_mdhash_id(dp["content"], prefix="chunk-"): {
                 **dp,
@@ -374,7 +361,6 @@ class MiniRAG:
                 self.tiktoken_model_name,
             )
         }
-
         if inserting_chunks:
             logger.info("Performing entity extraction on newly processed chunks")
             await extract_entities(
@@ -385,26 +371,20 @@ class MiniRAG:
                 relationships_vdb=self.relationships_vdb,
                 global_config=asdict(self),
             )
- 
         await self._insert_done()
 
     async def apipeline_enqueue_documents(
         self, input: str | list[str], ids: list[str] | None = None
     ) -> None:
         """
-        Pipeline for Processing Documents
-
-        1. Validate ids if provided or generate MD5 hash IDs
-        2. Remove duplicate contents
-        3. Generate document initial status
-        4. Filter out already processed documents
-        5. Enqueue document in status
+        文档入队处理流程：去重、生成ID、过滤已处理文档、入队。
+        :param input: 文本或文本列表
+        :param ids: ID列表
         """
         if isinstance(input, str):
             input = [input]
         if isinstance(ids, str):
             ids = [ids]
-
         if ids is not None:
             if len(ids) != len(input):
                 raise ValueError("Number of IDs must match the number of documents")
@@ -414,7 +394,6 @@ class MiniRAG:
         else:
             input = list(set(clean_text(doc) for doc in input))
             contents = {compute_mdhash_id(doc, prefix="doc-"): doc for doc in input}
-
         unique_contents = {
             id_: content
             for content, id_ in {
@@ -432,10 +411,8 @@ class MiniRAG:
             }
             for id_, content in unique_contents.items()
         }
-
         all_new_doc_ids = set(new_docs.keys())
         unique_new_doc_ids = await self.doc_status.filter_keys(all_new_doc_ids)
-
         new_docs = {
             doc_id: new_docs[doc_id]
             for doc_id in unique_new_doc_ids
@@ -444,7 +421,6 @@ class MiniRAG:
         if not new_docs:
             logger.info("No new unique documents were found.")
             return
-
         await self.doc_status.upsert(new_docs)
         logger.info(f"Stored {len(new_docs)} new unique documents")
 
@@ -454,16 +430,15 @@ class MiniRAG:
         split_by_character_only: bool = False,
     ) -> None:
         """
-        Process pending documents by splitting them into chunks, processing
-        each chunk for entity and relation extraction, and updating the
-        document status.
+        处理待处理文档：分块、实体关系抽取、状态更新。
+        :param split_by_character: 按字符分割（可选）
+        :param split_by_character_only: 是否仅按字符分割
         """
         processing_docs, failed_docs, pending_docs = await asyncio.gather(
             self.doc_status.get_docs_by_status(DocStatus.PROCESSING),
             self.doc_status.get_docs_by_status(DocStatus.FAILED),
             self.doc_status.get_docs_by_status(DocStatus.PENDING),
         )
-
         to_process_docs: dict[str, Any] = {
             **processing_docs,
             **failed_docs,
@@ -472,13 +447,12 @@ class MiniRAG:
         if not to_process_docs:
             logger.info("No documents to process")
             return
-
+        # 分批处理，支持并发
         docs_batches = [
             list(to_process_docs.items())[i : i + self.max_parallel_insert]
             for i in range(0, len(to_process_docs), self.max_parallel_insert)
         ]
         logger.info(f"Number of batches to process: {len(docs_batches)}")
-
         for batch_idx, docs_batch in enumerate(docs_batches):
             for doc_id, status_doc in docs_batch:
                 chunks = {
@@ -514,6 +488,9 @@ class MiniRAG:
         logger.info("Document processing pipeline completed")
 
     async def _insert_done(self):
+        """
+        插入流程结束后的回调，通知各存储完成索引。
+        """
         tasks = []
         for storage_inst in [
             self.full_docs,
@@ -531,10 +508,22 @@ class MiniRAG:
         await asyncio.gather(*tasks)
 
     def query(self, query: str, param: QueryParam = QueryParam()):
+        """
+        同步查询接口。
+        :param query: 查询字符串
+        :param param: 查询参数
+        :return: 查询结果
+        """
         loop = always_get_an_event_loop()
         return loop.run_until_complete(self.aquery(query, param))
 
     async def aquery(self, query: str, param: QueryParam = QueryParam()):
+        """
+        异步查询接口，支持多种模式（light/mini/naive）。
+        :param query: 查询字符串
+        :param param: 查询参数
+        :return: 查询结果
+        """
         if param.mode == "light":
             response = await hybrid_query(
                 query,
@@ -572,6 +561,9 @@ class MiniRAG:
         return response
 
     async def _query_done(self):
+        """
+        查询流程结束后的回调，通知缓存完成索引。
+        """
         tasks = []
         for storage_inst in [self.llm_response_cache]:
             if storage_inst is None:
@@ -580,17 +572,24 @@ class MiniRAG:
         await asyncio.gather(*tasks)
 
     def delete_by_entity(self, entity_name: str):
+        """
+        同步删除指定实体及其关系。
+        :param entity_name: 实体名
+        :return: 删除结果
+        """
         loop = always_get_an_event_loop()
         return loop.run_until_complete(self.adelete_by_entity(entity_name))
 
     async def adelete_by_entity(self, entity_name: str):
+        """
+        异步删除指定实体及其关系。
+        :param entity_name: 实体名
+        """
         entity_name = f'"{entity_name.upper()}"'
-
         try:
             await self.entities_vdb.delete_entity(entity_name)
             await self.relationships_vdb.delete_relation(entity_name)
             await self.chunk_entity_relation_graph.delete_node(entity_name)
-
             logger.info(
                 f"Entity '{entity_name}' and its relationships have been deleted."
             )
@@ -599,6 +598,9 @@ class MiniRAG:
             logger.error(f"Error while deleting entity '{entity_name}': {e}")
 
     async def _delete_by_entity_done(self):
+        """
+        删除实体流程结束后的回调，通知相关存储完成索引。
+        """
         tasks = []
         for storage_inst in [
             self.entities_vdb,
